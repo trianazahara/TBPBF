@@ -1,0 +1,417 @@
+const pool = require('../config/database');
+const { v4: uuidv4 } = require('uuid');
+
+
+const determineStatus = (tanggal_masuk, tanggal_keluar) => {
+    const current = new Date();
+    const masuk = new Date(tanggal_masuk);
+    const keluar = new Date(tanggal_keluar);
+    const sevenDaysBefore = new Date(keluar);
+    sevenDaysBefore.setDate(keluar.getDate() - 7);
+
+    if (current < masuk) {
+        return 'not_yet';
+    } else if (current > keluar) {
+        return 'selesai';
+    } else if (current >= sevenDaysBefore && current <= keluar) {
+        return 'almost';
+    } else {
+        return 'aktif';
+    }
+};
+
+const internController = {
+    add: async (req, res) => {
+        const conn = await pool.getConnection();
+        try {
+            if (!req.user || !req.user.userId) {
+                return res.status(401).json({
+                    status: 'error',
+                    message: 'Unauthorized: User authentication required'
+                });
+            }
+
+            await conn.beginTransaction();
+            const created_by = req.user.userId;
+
+            const {
+                nama,
+                jenis_peserta,
+                nama_institusi,
+                jenis_institusi,
+                email,
+                no_hp,
+                bidang_id,
+                tanggal_masuk,
+                tanggal_keluar,
+                detail_peserta,
+                nama_pembimbing,
+                telp_pembimbing
+            } = req.body;
+
+            // Validasi detail peserta
+            if (!detail_peserta) {
+                return res.status(400).json({
+                    status: 'error',
+                    message: 'Detail peserta wajib diisi'
+                });
+            }
+
+            // Validasi data mahasiswa/siswa
+            if (jenis_peserta === 'mahasiswa') {
+                if (!detail_peserta.nim || !detail_peserta.jurusan) {
+                    return res.status(400).json({
+                        status: 'error',
+                        message: 'NIM dan jurusan wajib diisi untuk mahasiswa'
+                    });
+                }
+            } else if (jenis_peserta === 'siswa') {
+                if (!detail_peserta.nisn || !detail_peserta.jurusan) {
+                    return res.status(400).json({
+                        status: 'error',
+                        message: 'NISN dan jurusan wajib diisi untuk siswa'
+                    });
+                }
+            }
+
+            const status = determineStatus(tanggal_masuk, tanggal_keluar);
+
+            // Insert data peserta magang
+            const id_magang = uuidv4();
+            const pesertaMagangQuery = `
+                INSERT INTO peserta_magang (
+                    id_magang, nama, jenis_peserta, nama_institusi,
+                    jenis_institusi, email, no_hp, id_bidang,
+                    tanggal_masuk, tanggal_keluar, status,
+                    nama_pembimbing, telp_pembimbing, mentor_id,          
+                    created_by, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            `;
+
+            const pesertaMagangValues = [
+                id_magang, nama, jenis_peserta, nama_institusi,
+                jenis_institusi, email || null, no_hp || null, bidang_id || null,
+                tanggal_masuk, tanggal_keluar, status,
+                nama_pembimbing || null, telp_pembimbing || null,
+                req.body.mentor_id || null,              
+                created_by
+            ];
+
+            await conn.execute(pesertaMagangQuery, pesertaMagangValues);
+
+            // Insert detail peserta (mahasiswa/siswa)
+            if (jenis_peserta === 'mahasiswa') {
+                const { nim, fakultas, jurusan, semester } = detail_peserta;
+                await conn.execute(`
+                    INSERT INTO data_mahasiswa (
+                        id_mahasiswa, id_magang, nim, fakultas, jurusan, semester, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                `, [uuidv4(), id_magang, nim, fakultas || null, jurusan, semester || null]);
+            } else if (jenis_peserta === 'siswa') {
+                const { nisn, jurusan, kelas } = detail_peserta;
+                await conn.execute(`
+                    INSERT INTO data_siswa (
+                        id_siswa, id_magang, nisn, jurusan, kelas, created_at
+                    ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                `, [uuidv4(), id_magang, nisn, jurusan, kelas || null]);
+            }
+
+            await conn.commit();
+
+            res.status(201).json({
+                status: 'success',
+                message: 'Data peserta magang berhasil ditambahkan',
+                data: {
+                    id_magang,
+                    nama,
+                    jenis_peserta,
+                    nama_institusi,
+                    status,
+                    created_by,
+                    created_at: new Date().toISOString()
+                }
+            });
+
+        } catch (error) {
+            await conn.rollback();
+            console.error('Error adding intern:', error);
+
+            if (error.code === 'ER_DUP_ENTRY') {
+                res.status(400).json({
+                    status: 'error',
+                    message: 'Data sudah ada dalam sistem'
+                });
+            } else {
+                res.status(500).json({
+                    status: 'error',
+                    message: 'Terjadi kesalahan server',
+                    error: process.env.NODE_ENV === 'development' ? error.message : undefined
+                });
+            }
+        } finally {
+            if (conn) conn.release();
+        }
+    },
+
+    update: async (req, res) => {
+        let conn = null;
+        try {
+            conn = await pool.getConnection();
+
+            if (!req.user || !req.user.userId) {
+                return res.status(401).json({
+                    status: 'error',
+                    message: 'Unauthorized: User authentication required'
+                });
+            }
+
+            console.log('Request Body:', req.body);
+
+            await conn.beginTransaction();
+
+            const { id } = req.params;
+            const updated_by = req.user.userId;
+            const {
+                nama,
+                jenis_peserta,
+                nama_institusi,
+                jenis_institusi,
+                email,
+                no_hp,
+                bidang_id,
+                tanggal_masuk,
+                tanggal_keluar,
+                status,
+                detail_peserta,
+                nama_pembimbing,
+                telp_pembimbing
+            } = req.body;
+
+            // Validasi data wajib
+            if (!id || !nama || !nama_institusi || !tanggal_masuk || !tanggal_keluar) {
+                throw new Error('Data wajib tidak lengkap');
+            }
+
+            // Cek keberadaan peserta
+            const [existingIntern] = await conn.execute(
+                `SELECT pm.*,
+                        dm.nim, dm.fakultas, dm.jurusan as mhs_jurusan, dm.semester,
+                        ds.nisn, ds.jurusan as siswa_jurusan, ds.kelas
+                 FROM peserta_magang pm
+                 LEFT JOIN data_mahasiswa dm ON pm.id_magang = dm.id_magang
+                 LEFT JOIN data_siswa ds ON pm.id_magang = ds.id_magang
+                 WHERE pm.id_magang = ?`,
+                [id]
+            );
+
+            if (existingIntern.length === 0) {
+                throw new Error('Data peserta magang tidak ditemukan');
+            }
+
+            // Validasi bidang
+            if (bidang_id && bidang_id.trim() !== '') {
+                const [bidangExists] = await conn.execute(
+                    'SELECT id_bidang FROM bidang WHERE id_bidang = ?',
+                    [bidang_id]
+                );
+
+                if (bidangExists.length === 0) {
+                    throw new Error('Bidang yang dipilih tidak valid');
+                }
+            }
+
+            // Hitung status baru
+            const newStatus = determineStatus(tanggal_masuk, tanggal_keluar);
+
+            // Update data utama
+            const updateQuery = `
+                UPDATE peserta_magang
+                SET nama = ?,
+                    jenis_peserta = ?,
+                    nama_institusi = ?,
+                    jenis_institusi = ?,
+                    email = ?,
+                    no_hp = ?,
+                    id_bidang = ?,
+                    tanggal_masuk = ?,
+                    tanggal_keluar = ?,
+                    status = ?,
+                    nama_pembimbing = ?,
+                    telp_pembimbing = ?,
+                    mentor_id = ?,
+                    updated_by = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id_magang = ?
+            `;
+
+            const updateValues = [
+                nama,
+                jenis_peserta || existingIntern[0].jenis_peserta,
+                nama_institusi,
+                jenis_institusi,
+                email,
+                no_hp,
+                bidang_id || null,
+                tanggal_masuk,
+                tanggal_keluar,
+                newStatus,
+                nama_pembimbing,
+                telp_pembimbing,
+                req.body.mentor_id || null,
+                updated_by,
+                id
+            ];
+
+            const [updateResult] = await conn.execute(updateQuery, updateValues);
+
+            const currentJenisPeserta = jenis_peserta || existingIntern[0].jenis_peserta;
+
+            // Update detail peserta
+            await conn.execute('DELETE FROM data_mahasiswa WHERE id_magang = ?', [id]);
+            await conn.execute('DELETE FROM data_siswa WHERE id_magang = ?', [id]);
+
+            if (currentJenisPeserta === 'mahasiswa') {
+                const { nim, fakultas, jurusan, semester } = detail_peserta || {};
+
+                if (!nim || !jurusan) {
+                    throw new Error('NIM dan jurusan wajib diisi untuk mahasiswa');
+                }
+
+                await conn.execute(`
+                    INSERT INTO data_mahasiswa 
+                    (id_mahasiswa, id_magang, nim, fakultas, jurusan, semester, created_at, updated_at)
+                    VALUES (UUID(), ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                `, [id, nim, fakultas, jurusan, semester]);
+
+            } else if (currentJenisPeserta === 'siswa') {
+                const { nisn, jurusan, kelas } = detail_peserta || {};
+
+                if (!nisn || !jurusan) {
+                    throw new Error('NISN dan jurusan wajib diisi untuk siswa');
+                }
+
+                await conn.execute(`
+                    INSERT INTO data_siswa 
+                    (id_siswa, id_magang, nisn, jurusan, kelas, created_at, updated_at)
+                    VALUES (UUID(), ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                `, [id, nisn, jurusan, kelas]);
+            }
+            
+            await conn.commit();
+
+            // Ambil data terbaru
+            const [updatedData] = await conn.execute(
+                `SELECT pm.*,
+                        dm.nim, dm.fakultas, dm.jurusan as mhs_jurusan, dm.semester,
+                        ds.nisn, ds.jurusan as siswa_jurusan, ds.kelas
+                 FROM peserta_magang pm
+                 LEFT JOIN data_mahasiswa dm ON pm.id_magang = dm.id_magang
+                 LEFT JOIN data_siswa ds ON pm.id_magang = ds.id_magang
+                 WHERE pm.id_magang = ?`,
+                [id]
+            );
+
+            res.json({
+                status: 'success',
+                message: 'Data peserta magang berhasil diperbarui',
+                data: updatedData[0]
+            });
+
+        } catch (error) {
+            console.error('Error updating intern:', error);
+
+            if (conn) {
+                await conn.rollback();
+            }
+
+            if (error.message.includes('wajib')) {
+                res.status(400).json({
+                    status: 'error',
+                    message: error.message
+                });
+            } else if (error.code === 'ER_DUP_ENTRY') {
+                res.status(400).json({
+                    status: 'error',
+                    message: 'NIM/NISN sudah terdaftar'
+                });
+            } else {
+                res.status(500).json({
+                    status: 'error',
+                    message: 'Terjadi kesalahan server',
+                    error: process.env.NODE_ENV === 'development' ? error.message : undefined
+                });
+            }
+        } finally {
+            if (conn) {
+                conn.release();
+            }
+        }
+    },
+
+    // Hapus data peserta magang
+    delete: async (req, res) => {
+        const conn = await pool.getConnection();
+        try {
+            await conn.beginTransaction();
+            
+            const { id } = req.params;
+      
+            const [internData] = await conn.execute(
+                'SELECT nama, jenis_peserta FROM peserta_magang WHERE id_magang = ?',
+                [id]
+            );
+    
+            if (internData.length === 0) {
+                await conn.rollback();
+                return res.status(404).json({
+                    status: 'error',
+                    message: 'Data peserta magang tidak ditemukan'
+                });
+            }
+    
+            const internName = internData[0].nama;
+    
+            // Hapus data terkait sesuai jenis peserta
+            if (internData[0].jenis_peserta === 'mahasiswa') {
+                await conn.execute(
+                    'DELETE FROM data_mahasiswa WHERE id_magang = ?',
+                    [id]
+                );
+            } else if (internData[0].jenis_peserta === 'siswa') {
+                await conn.execute(
+                    'DELETE FROM data_siswa WHERE id_magang = ?',
+                    [id]
+                );
+            }
+    
+            // Hapus data utama
+            const [deleteResult] = await conn.execute(
+                'DELETE FROM peserta_magang WHERE id_magang = ?',
+                [id]
+            );
+    
+            if (deleteResult.affectedRows === 0) {
+                throw new Error('Gagal menghapus data peserta magang');
+            }
+
+            await conn.commit();
+    
+            res.json({
+                status: 'success',
+                message: 'Data peserta magang berhasil dihapus'
+            });
+    
+        } catch (error) {
+            await conn.rollback();
+            console.error('Error deleting intern:', error);
+            res.status(500).json({
+                status: 'error',
+                message: error.message || 'Terjadi kesalahan server'
+            });
+        } finally {
+            conn.release();
+        }
+    },
+};
+
+module.exports = internController;
