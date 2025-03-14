@@ -10,4 +10,6 @@ router.post('/add', requireRole(['superadmin', 'admin']), internController.add);
 router.put('/:id', requireRole(['superadmin', 'admin']), internController.update);
 router.delete('/:id', internController.delete);
 
+router.get('/riwayat-data', internController.getHistory);
+
 module.exports = router;
