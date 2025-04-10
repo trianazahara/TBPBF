@@ -413,6 +413,120 @@ const internController = {
         }
     },
 
+    checkAvailability: async (req, res) => {
+        try {
+            res.setHeader('Content-Type', 'application/json');
+            const inputDate = req.query.date;
+
+            if (!inputDate) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Parameter tanggal diperlukan'
+                });
+            }
+
+            const formattedDate = inputDate;
+            const SLOT_LIMIT = 50;
+
+            // Hitung peserta aktif
+            const [activeInterns] = await pool.execute(`
+                SELECT COUNT(*) as count
+                FROM peserta_magang
+                WHERE status = 'aktif'
+                AND ? BETWEEN tanggal_masuk AND tanggal_keluar
+            `, [formattedDate]);
+
+            // Hitung peserta yang akan datang
+            const [upcomingInterns] = await pool.execute(`
+                SELECT COUNT(*) as count
+                FROM peserta_magang
+                WHERE status = 'not_yet'
+                AND tanggal_masuk <= ?
+            `, [formattedDate]);
+
+            // Ambil info peserta yang akan selesai
+            const [leavingInterns] = await pool.execute(`
+                SELECT
+                    p.id_magang,
+                    p.nama,
+                    DATE_FORMAT(p.tanggal_keluar, '%Y-%m-%d') as tanggal_keluar,
+                    b.nama_bidang
+                FROM peserta_magang p
+                LEFT JOIN bidang b ON p.id_bidang = b.id_bidang
+                WHERE p.status = 'almost'
+                AND p.tanggal_keluar BETWEEN ? AND DATE_ADD(?, INTERVAL 7 DAY)
+                ORDER BY p.tanggal_keluar ASC
+            `, [formattedDate, formattedDate]);
+
+            // Hitung total slot terisi
+            const totalActive = parseInt(activeInterns[0].count);
+            const totalUpcoming = parseInt(upcomingInterns[0].count);
+            const totalOccupied = totalActive + totalUpcoming;
+
+            let message = '';
+            if (totalOccupied >= SLOT_LIMIT) {
+                message = `Saat ini terisi: ${totalOccupied} dari ${SLOT_LIMIT} slot`;
+            } else {
+                const availableSlots = SLOT_LIMIT - totalOccupied;
+                message = `Tersedia ${availableSlots} slot dari total ${SLOT_LIMIT} slot`;
+            }
+
+            return res.status(200).json({
+                success: true,
+                available: totalOccupied < SLOT_LIMIT,
+                totalOccupied,
+                currentActive: totalActive,
+                upcomingInterns: totalUpcoming,
+                message,
+                date: formattedDate
+            });
+
+        } catch (error) {
+            console.error('Error pada pengecekan ketersediaan:', error);
+            return res.status(500).json({
+                success: false,
+                message: 'Terjadi kesalahan saat mengecek ketersediaan',
+                error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
+            });
+        }
+    },
+    setMissingStatus: async (req, res) => {
+        const conn = await pool.getConnection();
+        try {
+            await conn.beginTransaction();
+            const { id } = req.params;
+
+            const [updateResult] = await conn.execute(
+                `UPDATE peserta_magang
+                 SET status = 'missing',
+                     updated_by = ?,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id_magang = ?`,
+                [req.user.userId, id]
+            );
+
+            if (updateResult.affectedRows === 0) {
+                throw new Error('Gagal mengupdate status peserta magang');
+            }
+
+            await conn.commit();
+            
+            res.json({
+                status: 'success',
+                message: 'Status peserta magang berhasil diubah menjadi missing'
+            });
+
+        } catch (error) {
+            await conn.rollback();
+            console.error('Error setting missing status:', error);
+            res.status(500).json({
+                status: 'error',
+                message: error.message || 'Terjadi kesalahan server'
+            });
+        } finally {
+            conn.release();
+
+
     // Ambil riwayat peserta magang yang sudah selesai/missing
     getHistory: async (req, res) => {
         try {

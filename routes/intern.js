@@ -9,6 +9,8 @@ router.use(authMiddleware);
 router.post('/add', requireRole(['superadmin', 'admin']), internController.add);
 router.put('/:id', requireRole(['superadmin', 'admin']), internController.update);
 router.delete('/:id', internController.delete);
+router.get('/check-availability', internController.checkAvailability);
+router.patch('/missing/:id', requireRole(['superadmin', 'admin']), internController.setMissingStatus);
 
 router.get('/riwayat-data', internController.getHistory);
 
