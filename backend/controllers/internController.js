@@ -508,6 +508,13 @@ const internController = {
                 throw new Error('Gagal mengupdate status peserta magang');
             }
 
+            // Buat notifikasi
+            await createInternNotification(conn, {
+                userId: req.user.userId,
+                internName: (await conn.execute('SELECT nama FROM peserta_magang WHERE id_magang = ?', [id]))[0][0].nama,
+                action: 'menandai sebagai missing'
+            });
+
             await conn.commit();
             
             res.json({
@@ -524,6 +531,105 @@ const internController = {
             });
         } finally {
             conn.release();
+        }
+    },
+
+    // Ambil riwayat peserta magang yang sudah selesai/missing
+    getHistory: async (req, res) => {
+        try {
+            const {
+                page = 1,
+                limit = 10,
+                status = 'selesai,missing,almost', 
+                bidang,
+                search
+            } = req.query;
+    
+            const offset = (page - 1) * limit;
+            const statusArray = status.split(','); 
+            const statusPlaceholders = statusArray.map(() => '?').join(',');
+            const params = [...statusArray];
+            const countParams = [...statusArray];
+
+            // Query dasar riwayat
+            let query = `
+                SELECT 
+                    pm.id_magang, 
+                    pm.nama, 
+                    pm.nama_institusi, 
+                    b.nama_bidang, 
+                    pm.status, 
+                    pm.tanggal_masuk, 
+                    pm.tanggal_keluar,
+                    EXISTS (
+                        SELECT 1 FROM penilaian p 
+                        WHERE p.id_magang = pm.id_magang
+                    ) as has_scores
+                FROM peserta_magang pm
+                LEFT JOIN bidang b ON pm.id_bidang = b.id_bidang
+                WHERE pm.status IN (${statusPlaceholders})
+            `;
+    
+            let countQuery = `
+                SELECT COUNT(*) AS total 
+                FROM peserta_magang pm
+                LEFT JOIN bidang b ON pm.id_bidang = b.id_bidang
+                WHERE pm.status IN (${statusPlaceholders})
+            `;
+
+            // Filter untuk admin
+            if (req.user.role === 'admin') {
+                query += ` AND pm.mentor_id = ?`;
+                countQuery += ` AND pm.mentor_id = ?`;
+                params.push(req.user.userId);
+                countParams.push(req.user.userId);
+            }
+
+            // Filter bidang
+            if (bidang) {
+                query += ` AND pm.id_bidang = ?`;
+                countQuery += ` AND pm.id_bidang = ?`;
+                params.push(bidang);
+                countParams.push(bidang);
+            }
+
+            // Filter pencarian
+            if (search) {
+                query += ` AND (pm.nama LIKE ? OR pm.nama_institusi LIKE ?)`;
+                countQuery += ` AND (pm.nama LIKE ? OR pm.nama_institusi LIKE ?)`;
+                params.push(`%${search}%`, `%${search}%`);
+                countParams.push(`%${search}%`, `%${search}%`);
+            }
+            
+            query += ` ORDER BY pm.tanggal_keluar DESC LIMIT ? OFFSET ?`;
+            params.push(parseInt(limit), parseInt(offset));
+    
+            console.log('Query:', query); 
+            console.log('Params:', params);
+    
+            const [rows] = await pool.execute(query, params);
+    
+            const [countRows] = await pool.execute(countQuery, countParams);
+            const totalData = countRows[0]?.total || 0;
+            const totalPages = Math.ceil(totalData / limit);
+    
+            return res.status(200).json({
+                status: "success",
+                data: rows,
+                pagination: {
+                    currentPage: parseInt(page),
+                    totalPages,
+                    totalData,
+                    limit: parseInt(limit),
+                },
+            });
+        } catch (error) {
+            console.error('Error fetching history:', error);
+            return res.status(500).json({
+                status: "error",
+                message: 'Terjadi kesalahan server',
+                error: error.message,
+            });
         }
     },
 };
