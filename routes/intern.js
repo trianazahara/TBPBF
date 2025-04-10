@@ -12,4 +12,6 @@ router.delete('/:id', internController.delete);
 router.get('/check-availability', internController.checkAvailability);
 router.patch('/missing/:id', requireRole(['superadmin', 'admin']), internController.setMissingStatus);
 
+router.get('/riwayat-data', internController.getHistory);
+
 module.exports = router;
