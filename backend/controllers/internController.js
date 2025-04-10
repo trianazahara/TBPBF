@@ -509,6 +509,13 @@ const internController = {
                 throw new Error('Gagal mengupdate status peserta magang');
             }
 
+            // Buat notifikasi
+            await createInternNotification(conn, {
+                userId: req.user.userId,
+                internName: (await conn.execute('SELECT nama FROM peserta_magang WHERE id_magang = ?', [id]))[0][0].nama,
+                action: 'menandai sebagai missing'
+            });
+
             await conn.commit();
             
             res.json({
@@ -525,7 +532,8 @@ const internController = {
             });
         } finally {
             conn.release();
-
+        }
+    },
 
     // Ambil riwayat peserta magang yang sudah selesai/missing
     getHistory: async (req, res) => {
