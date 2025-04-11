@@ -20,10 +20,69 @@ const determineStatus = (tanggal_masuk, tanggal_keluar) => {
     }
 };
 
+const createInternNotification = async (conn, {userId, internName, action = 'menambah'}) => {
+    try {
+        // Ambil nama user
+        const [userData] = await conn.execute(
+            'SELECT nama FROM users WHERE id_users = ?',  
+            [userId]
+        );
+        const nama = userData[0]?.nama || 'Unknown User';  
+
+        // Notifikasi untuk semua user
+        const [allUsers] = await conn.execute('SELECT id_users FROM users');
+
+        const query = `
+            INSERT INTO notifikasi (
+                id_notifikasi,
+                user_id,
+                judul,
+                pesan,
+                dibaca,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        `;
+       
+        // Kirim notifikasi ke setiap user
+        for (const user of allUsers) {
+            const values = [
+                uuidv4(),
+                user.id_users,
+                'Aktivitas Peserta Magang',
+                `${nama} telah ${action} data peserta magang: ${internName}`,  
+                0
+            ];
+           
+            await conn.execute(query, values);
+        }
+       
+    } catch (error) {
+        console.error('Error creating notification:', error);
+        throw error;
+    }
+};
+
+const updateInternStatuses = async (conn) => {
+    const query = `
+        UPDATE peserta_magang
+        SET status = CASE
+            WHEN status = 'missing' THEN 'missing'
+            WHEN CURRENT_DATE < tanggal_masuk THEN 'not_yet'
+            WHEN CURRENT_DATE > tanggal_keluar THEN 'selesai'
+            WHEN CURRENT_DATE BETWEEN DATE_SUB(tanggal_keluar, INTERVAL 7 DAY) AND tanggal_keluar THEN 'almost'
+            ELSE 'aktif'
+        END
+        WHERE status != 'selesai'
+    `;
+    await conn.execute(query);
+};
+
+
 const internController = {
     add: async (req, res) => {
         const conn = await pool.getConnection();
         try {
+            // Validasi autentikasi
             if (!req.user || !req.user.userId) {
                 return res.status(401).json({
                     status: 'error',
@@ -116,6 +175,13 @@ const internController = {
                 `, [uuidv4(), id_magang, nisn, jurusan, kelas || null]);
             }
 
+            // Buat notifikasi
+            await createInternNotification(conn, {
+                userId: req.user.userId,
+                internName: nama,
+                action: 'menambah'
+            });
+
             await conn.commit();
 
             res.status(201).json({
@@ -158,6 +224,7 @@ const internController = {
         try {
             conn = await pool.getConnection();
 
+            // Validasi autentikasi
             if (!req.user || !req.user.userId) {
                 return res.status(401).json({
                     status: 'error',
@@ -296,7 +363,14 @@ const internController = {
                     VALUES (UUID(), ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 `, [id, nisn, jurusan, kelas]);
             }
-            
+
+            // Buat notifikasi
+            await createInternNotification(conn, {
+                userId: req.user.userId,
+                internName: nama,
+                action: 'mengupdate'
+            });
+
             await conn.commit();
 
             // Ambil data terbaru
@@ -355,7 +429,8 @@ const internController = {
             await conn.beginTransaction();
             
             const { id } = req.params;
-      
+            
+            // Ambil nama peserta untuk notifikasi
             const [internData] = await conn.execute(
                 'SELECT nama, jenis_peserta FROM peserta_magang WHERE id_magang = ?',
                 [id]
@@ -393,9 +468,15 @@ const internController = {
             if (deleteResult.affectedRows === 0) {
                 throw new Error('Gagal menghapus data peserta magang');
             }
-
-            await conn.commit();
     
+            // Buat notifikasi penghapusan
+            await createInternNotification(conn, {
+                userId: req.user.userId,
+                internName: internName,
+                action: 'menghapus'
+            });
+    
+            await conn.commit();
             res.json({
                 status: 'success',
                 message: 'Data peserta magang berhasil dihapus'
@@ -412,6 +493,214 @@ const internController = {
             conn.release();
         }
     },
+    getMentors: async (req, res) => {
+        try {
+            let query;
+            const params = [];
+
+            if (req.user.role === 'superadmin') {
+                query = `SELECT id_users, nama FROM users WHERE role = 'admin' AND is_active = 1`;
+            } else {
+                query = `SELECT id_users, nama FROM users WHERE id_users = ? AND is_active = 1`;
+                params.push(req.user.userId);
+            }
+
+            const [mentors] = await pool.execute(query, params);
+            res.json(mentors);
+        } catch (error) {
+            console.error('Error getting mentors:', error);
+            res.status(500).json({ message: 'Internal server error' });
+        }
+    },
+    getAll: async (req, res) => {
+        try {
+            const {
+                page = 1,
+                limit = 10,
+                status,
+                bidang,
+                search,
+                excludeStatus
+            } = req.query;
+
+            const offset = (page - 1) * limit;
+            
+            // Query dasar dengan pengecekan data lengkap
+            let query = `
+                SELECT
+                    p.*,
+                    b.nama_bidang,
+                    CASE 
+                        WHEN p.email IS NULL 
+                        OR p.no_hp IS NULL
+                        OR p.nama_pembimbing IS NULL
+                        OR p.telp_pembimbing IS NULL
+                        OR (
+                            CASE 
+                                WHEN p.jenis_peserta = 'mahasiswa' THEN 
+                                    EXISTS(
+                                        SELECT 1 FROM data_mahasiswa m 
+                                        WHERE m.id_magang = p.id_magang 
+                                        AND (m.fakultas IS NULL OR m.semester IS NULL)
+                                    )
+                                ELSE 
+                                    EXISTS(
+                                        SELECT 1 FROM data_siswa s 
+                                        WHERE s.id_magang = p.id_magang 
+                                        AND s.kelas IS NULL
+                                    )
+                            END
+                        )
+                        THEN true 
+                        ELSE false 
+                    END as has_incomplete_data
+                FROM peserta_magang p
+                LEFT JOIN bidang b ON p.id_bidang = b.id_bidang
+                WHERE 1=1
+            `;
+
+            const params = [];
+
+            // Filter untuk admin
+            if (req.user.role === 'admin') {
+                query += ` AND p.mentor_id = ?`;
+                params.push(req.user.userId);
+            }
+
+            // Filter status yang diexclude
+            if (excludeStatus) {
+                const statusesToExclude = excludeStatus.split(',');
+                query += ` AND p.status NOT IN (${statusesToExclude.map(() => '?').join(',')})`;
+                params.push(...statusesToExclude);
+            }
+
+            // Filter status
+            if (status) {
+                query += ` AND p.status = ?`;
+                params.push(status);
+            }
+
+            // Filter bidang
+            if (bidang) {
+                query += ` AND p.id_bidang = ?`;
+                params.push(bidang);
+            }
+
+            // Filter pencarian
+            if (search) {
+                query += ` AND (p.nama LIKE ? OR p.nama_institusi LIKE ?)`;
+                params.push(`%${search}%`, `%${search}%`);
+            }
+
+            // Hitung total data
+            const countQuery = `SELECT COUNT(*) as total FROM (${query}) as count_query`;
+            const [countResult] = await pool.execute(countQuery, params);
+            const total = countResult[0].total;
+
+            // Tambah paginasi
+            query += ` ORDER BY p.created_at DESC LIMIT ? OFFSET ?`;
+            params.push(Number(limit), Number(offset));
+
+            const [rows] = await pool.execute(query, params);
+
+            res.json({
+                status: 'success',
+                data: rows,
+                pagination: {
+                    total,
+                    totalPages: Math.ceil(total / limit),
+                    page: Number(page),
+                    limit: Number(limit)
+                }
+            });
+
+        } catch (error) {
+            console.error('Error getting interns:', error);
+            res.status(500).json({
+                status: 'error',
+                message: 'Terjadi kesalahan server'
+            });
+        }
+    },
+    // Ambil detail peserta magang
+    getDetail: async (req, res) => {
+        try {
+            const { id } = req.params;
+
+            // Query gabungan dengan data mahasiswa/siswa
+            const [rows] = await pool.execute(`
+                SELECT
+                    p.*,
+                    b.nama_bidang,
+                    p.nama_pembimbing,    
+                    p.telp_pembimbing,
+                    p.mentor_id,   
+                    CASE
+                        WHEN p.jenis_peserta = 'mahasiswa' THEN (
+                            SELECT JSON_OBJECT(
+                                'nim', m.nim,
+                                'fakultas', m.fakultas,
+                                'jurusan', m.jurusan,
+                                'semester', m.semester
+                            )
+                        )
+                        ELSE (
+                            SELECT JSON_OBJECT(
+                                'nisn', s.nisn,
+                                'jurusan', s.jurusan,
+                                'kelas', s.kelas
+                            )
+                        )
+                    END as detail_peserta
+                FROM peserta_magang p
+                LEFT JOIN bidang b ON p.id_bidang = b.id_bidang
+                LEFT JOIN data_mahasiswa m ON p.id_magang = m.id_magang
+                LEFT JOIN data_siswa s ON p.id_magang = s.id_magang
+                WHERE p.id_magang = ?
+            `, [id]);
+
+            if (rows.length === 0) {
+                return res.status(404).json({
+                    status: 'error',
+                    message: 'Data peserta magang tidak ditemukan'
+                });
+            }
+
+            if (rows[0].detail_peserta) {
+                rows[0].detail_peserta = JSON.parse(rows[0].detail_peserta);
+            }
+
+            res.json({
+                status: 'success',
+                data: rows[0]
+            });
+
+        } catch (error) {
+            console.error('Error getting intern detail:', error);
+            res.status(500).json({ message: 'Terjadi kesalahan server' });
+        }
+    },
+     // Update status semua peserta
+     updateStatuses: async (req, res) => {
+        const conn = await pool.getConnection();
+        try {
+            await conn.beginTransaction();
+            await updateInternStatuses(conn);
+            await conn.commit();
+
+            res.json({
+                status: 'success',
+                message: 'Status peserta magang berhasil diperbarui'
+            });
+        } catch (error) {
+            await conn.rollback();
+            console.error('Error updating statuses:', error);
+            res.status(500).json({ message: 'Terjadi kesalahan server' });
+        } finally {
+            conn.release();
+        }
+    },
+
     checkAvailability: async (req, res) => {
         try {
             res.setHeader('Content-Type', 'application/json');
