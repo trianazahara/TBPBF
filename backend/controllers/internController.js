@@ -412,7 +412,6 @@ const internController = {
             conn.release();
         }
     },
-
     checkAvailability: async (req, res) => {
         try {
             res.setHeader('Content-Type', 'application/json');
