@@ -7,8 +7,9 @@ var logger = require('morgan');
 
 const authRoutes = require('./routes/auth');
 const internRoutes = require('./routes/intern');
-
+const notificationRoutes = require('./routes/notification');
 const adminRoutes = require('./routes/admin');
+const bidangRoutes = require('./routes/bidang');
 
 
 var app = express();
@@ -33,6 +34,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.use('/api/auth', authRoutes);
 app.use('/api/intern', internRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/bidang', bidangRoutes);
 
 
 // catch 404 and forward to error handler

@@ -8,11 +8,11 @@ router.use(authMiddleware);
 
 
 router.get('/', internController.getAll);
+router.get('/check-availability', internController.checkAvailability);
 router.post('/add', requireRole(['superadmin', 'admin']), internController.add);
 router.put('/:id', requireRole(['superadmin', 'admin']), internController.update);
 router.get('/:id', internController.getDetail);
 router.delete('/:id', internController.delete);
-router.get('/check-availability', internController.checkAvailability);
 router.patch('/missing/:id', requireRole(['superadmin', 'admin']), internController.setMissingStatus);
 router.get('/mentors', internController.getMentors);
 
